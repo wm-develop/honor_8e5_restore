@@ -1,186 +1,200 @@
 # hnubl 恢复助手
 
-独立的 Android 恢复工具，包名为 `wm.honor8e5restore`。用于撤销指定设备上的假回锁及相关启动分区修改，不是通用 BL 解锁工具，也不是 hnubl 的官方功能或官方模块。
+一款用于撤销 hnubl 假回锁及相关启动分区修改的独立 Android 应用，包名为 `wm.honor8e5restore`。
 
-## 原作者与项目关系
+它不是通用 BL 解锁工具，也不是 hnubl 的官方功能或官方模块。
 
-原 hnubl 项目及作者主页：
+## 主要用途
 
-- [hawyn2018/honor_8e5_ubl](https://github.com/hawyn2018/honor_8e5_ubl)
+本应用主要用于帮助使用 hnubl 执行过假回锁操作的设备恢复到未操作前的启动环境，降低后续出售二手设备时因假回锁导致的风险。
 
-原作者明确表示不考虑恢复功能，并建议有需要的用户独立开发，不要把恢复功能放进 hnubl 或 fork 后加入。截图中的原话包括：
+设备假回锁后，如果直接进行普通 OTA 而不执行保锁 OTA，重启后可能变砖或回退到当前槽。本应用可恢复设备原有的 ABL、init_boot 和分区表，删除 efisp 分区，使设备尽量回到可正常启动、可继续接收官方 OTA 的状态。
 
-> 想写恢复软件可以 自己单独开软件 不要放在我的hnubl里
+## 与 [hnubl](https://github.com/hawyn2018/honor_8e5_ubl) 项目的关系
 
-因此，本项目采用独立应用、独立源码仓库的形式。原项目及作者不参与本恢复工具的开发，也不为其提供背书。
+原 hnubl 项目及作者主页：[hawyn2018/honor_8e5_ubl](https://github.com/hawyn2018/honor_8e5_ubl)。
+
+原作者明确表示不考虑恢复功能，并建议有需要的用户独立开发。因此，本项目采用独立应用、独立源码仓库的形式。原项目及作者不参与本恢复工具的开发，也不为其提供背书。
 
 ![原作者关于不加入恢复功能的说明](docs/assets/hnubl-author-restore-feature.jpg)
 
 感谢原作者及原项目提供的分区研究基础，也感谢 BusyBox、Miuix、AndroidX、Kotlin 等第三方项目的贡献者。
 
-## 主要功能
+## 使用前必须知道
 
-- 按实际 OTA 次数分步导入备份：0 次、1 次或多次。
-- 多次 OTA 时，使用最近两次备份优先恢复双槽；缺少倒数第二次备份时，明确确认风险后仅恢复当前槽。
-- 校验备份文件、清单、镜像长度和 SHA-256，拒绝损坏或不完整的输入。
-- 恢复前 ZIP 同时校验整份字节、ZIP 结构、必需条目及逐文件内容。
-- 写入前停止 OTA 配套服务并确认退出，使用事务锁防止并发恢复。
-- 首次写入前持久化中断标记；写入完成后重新扫描，未通过则要求人工复核。
-- GPT 仅删除 `efisp` 并恢复原始 `userdata` 末端，保留当前分区类型、GUID 和 A/B 属性。
+**恢复分区存在启动失败风险。请先备份个人数据，并确认使用的备份来自同一台设备、对应当前系统。**
 
-App 不格式化 `userdata`、不主动扩大 F2FS、不切换槽位、不自动重启、不修改 OEMINFO/DeviceInfo，也不执行官方回锁。
+使用前请准备：
 
-## 构建要求
+- 使用 hnubl 进行过假回锁操作的，荣耀搭载 Snapdragon 8 Elite Gen5 的设备，并允许恢复助手使用 Root。
+- 假回锁前用 hnubl 备份页生成的干净备份。
+- 如果做过保锁 OTA，还要准备对应的 OTA 备份。
+- 足够的电量，并暂停系统更新和其他分区工具。
 
-- JDK 17。
-- Android SDK 37 和 Build Tools 37.0.0。
-- 包含 `aarch64-linux-android28-clang` 的 Android NDK。
-- 可访问 Gradle 发行版和 Maven 依赖仓库的网络环境。
+App 不格式化 `userdata`，但错误的镜像、断电或其他工具同时修改分区，仍可能导致系统无法启动。
 
-项目附带 Gradle 9.5.0 wrapper。首次构建时，wrapper 会按 `gradle/wrapper/gradle-wrapper.properties` 下载对应发行版。网络不可用时，可将 `distributionUrl` 改为本机已有的 Gradle 9.5.0 ZIP 路径，或直接使用已安装的 Gradle 执行相同任务。
+## 需要哪些备份
 
-设置 SDK 路径：
+备份通常位于 `/sdcard/Download/hnubl`，hnubl 的早期版本（2.5.1 及之前）可能位于 `/sdcard/Download`：
 
-```bash
-export ANDROID_HOME=/path/to/Android/Sdk
-```
+| 假回锁后的情况 | 需要的备份 | 恢复方式 |
+| --- | --- | --- |
+| 没有做过保锁 OTA | 假回锁前的干净备份 | 恢复双槽 |
+| 做过 1 次保锁 OTA | 干净备份＋那一次 OTA 备份 | 恢复双槽 |
+| 做过多次保锁 OTA，且有最近两次备份 | 干净备份＋最后一次＋倒数第二次 OTA 备份 | 优先恢复双槽 |
+| 做过多次保锁 OTA，但只有最近一次备份 | 干净备份＋最后一次 OTA 备份 | 仅恢复当前槽，风险较高 |
 
-也可通过 `ANDROID_NDK_HOME` 指定 NDK，否则构建脚本从 SDK 的 `ndk` 目录选择。
+更早的 OTA 备份通常不需要导入。**多次 OTA 时，也不是导入越多越好，按上面的组合选择即可。**
 
-## 构建
+### 什么是干净备份
 
-在项目根目录执行：
+指假回锁前备份的 `ublbackup_日期_时间` 文件夹。它的分区表中不应包含 `efisp`。
+
+OTA 备份文件夹通常名为 `hnubl_ota_backup_日期_时间`，包含执行那次保锁更新写入前的候选镜像。App 会核对文件和哈希，但不会独立证明它们就是官方签名镜像，因此仍需你确认来源和系统版本。
+
+## 按步骤使用
+
+### 1. 选择实际 OTA 次数
+
+首次打开 App，会弹出选择窗口：
+
+- **0 次**：只需要导入假回锁前的干净备份。
+- **1 次**：先导入干净备份，再导入那一次 OTA 备份。
+- **多次**：先导入干净备份和最后一次 OTA 备份，然后确认是否有倒数第二次备份。
+
+如果选错了，可以重新选择次数并重新导入。重新开始只删除 App 内的导入副本，**不会删除 `Download` 中的原备份**。
+
+### 2. 按提示导入整个文件夹
+
+App 每次只显示当前需要导入的备份类型，按按钮顺序操作即可。
+
+在系统文件选择器中，**选中整个备份文件夹并确认，不要只选择里面的 `img` 文件**。
+
+多次 OTA 时，点击“确认是否有倒数第二次保锁 OTA 备份”：
+
+- 选择“有”，继续导入倒数第二次备份，优先恢复双槽。
+- 选择“没有”，阅读并确认风险后，仅恢复当前槽。
+
+倒数第二次备份必须比最后一次更早，并且槽位连续。选错文件、重复选择最后一次或选择类型不符的文件夹，App 会拒绝，不会替换已导入的正确副本。
+
+### 3. 读取设备与分区信息
+
+完成备份导入后，点击“读取设备与分区信息”。
+
+这一步是**只读检查**，用于确认：
+
+- 当前从 A 槽还是 B 槽启动；
+- ABL、init_boot 和分区表是否与备份匹配；
+- `userdata` 文件系统是否适合恢复；
+- `/sdcard/Download/hnubl` 中有多少套 OTA 备份目录。
+
+此时不会写入分区、切换槽位或重启。
+
+### 4. 处理次数与目录不一致的提示
+
+如果 App 提示“OTA 次数与目录不一致”，说明你的选择与目录数量反映的情况不同。
+
+目录可能被删除、移动或重复，所以**数量不一致本身不代表选择一定错误**。请再次确认后，选择：
+
+- 次数选择真实，继续审查；
+- 或重新选择次数并重新导入。
+
+不要为了绕过提示而随意选择次数。
+
+### 5. 查看恢复计划
+
+重点确认页面显示的是哪一种：
+
+- **双槽恢复**：处理两个系统槽，另一槽不需要依赖后续 OTA 修复。
+- **仅恢复当前槽**：另一槽不处理，存在后续风险。
+
+同时检查准备写入的镜像来源、当前系统版本和所有警告。不要只看“可以恢复”就继续。
+
+### 6. 确认并执行
+
+确认前需要逐项阅读并勾选风险说明，然后选择恢复前备份 ZIP 的保存位置。
+
+执行过程中，App 会：
+
+1. 重新扫描并核对已审查的计划；
+2. 导出并逐条校验恢复前备份；
+3. 停止 OTA 配套服务并取得事务锁；
+4. 写入计划中的镜像并回读检查；
+5. 最后处理分区表；
+6. 再次扫描，确认没有遗漏的恢复项目。
+
+任何关键检查失败都应停止。**不要中途强制关闭 App、重启设备或同时操作其他分区工具。**
+
+### 7. 完成后手动重启
+
+App 不会自动重启，也不会切换槽位。
+
+最终扫描通过后，请按提示手动重启，并观察系统能否正常启动。如果中断或最终扫描未通过，App 会保留中断标记，必须人工复核后才能继续。
+
+## 仅恢复当前槽有什么风险
+
+多次 OTA 但只有最近一次备份时，另一槽无法由最近两次备份直接恢复。
+
+删除共享的 `efisp` 后，另一槽可能无法启动，不能再把它当作可靠回退槽。
+
+后续也不能直接依赖一个只包含少量文件的小增量 OTA 修复：
+
+- 如果更新包不含 ABL 或 init_boot，另一槽可能仍然缺少所需镜像。
+- 应使用包含这些分区的官方全量包，或先单独修复另一槽。
+- 只有官方 OTA 写入、切槽和重启都成功后，才能认为另一槽已经恢复。
+
+**如果当前槽第一次启动失败，可能无法依靠另一槽自救。没有倒数第二次备份时，请先导出个人数据并认真考虑是否继续。**
+
+## 常见问题
+
+### 这是官方回锁吗
+
+不是。App 不修改 OEMINFO/DeviceInfo，也不执行厂商官方回锁。
+
+Fastboot 中仍可能显示 `PHONE Unlocked`。不要因为这个显示再尝试官方回锁，锁态需要单独核验。
+
+### 会清空应用和个人数据吗
+
+App 不格式化 `userdata`，也不主动扩大文件系统。但这不等于没有启动失败或数据损失风险，所以仍应先备份个人数据。
+
+### 可以只使用假回锁前的备份吗
+
+做过保锁 OTA 后，不建议只靠假回锁前的备份。新系统可能已有新的 ABL、init_boot 或其他前级分区，需要相应 OTA 备份提供候选镜像。
+
+### `freeotaok=1` 是否表示必须等待重启
+
+不是。它可能只是上次保锁 OTA 留下的完成标记，不代表现在一定有等待重启的更新。执行前仍应由你确认当前没有已安装完成、等待重启的系统更新。
+
+### 删除 App 内的导入副本会删除原备份吗
+
+不会。删除按钮只移除 App 内副本，`Download` 中的原文件不变。
+
+### 中断后可以立即重试吗
+
+不建议。先确认哪些分区已经改变、恢复前备份是否可用，以及当前系统能否启动。中断标记需要人工复核，不能把它当成恢复成功的证明。
+
+## 构建源码
+
+普通用户可以直接使用构建好的 APK，无需配置开发环境。
+
+开发者需要 JDK 17、Android SDK 37、Build Tools 37.0.0 和包含 `aarch64-linux-android28-clang` 的 NDK。在项目根目录执行：
 
 ```bash
 ./gradlew :restore-core:test :restoreapp:assembleRelease
 ```
 
-Windows CMD 可使用：
+Windows CMD 可执行：
 
 ```bat
 gradlew.bat :restore-core:test :restoreapp:assembleRelease
 ```
 
-输出文件：
+APK 输出到 `restoreapp/build/outputs/apk/release/restoreapp-release.apk`。Debug 构建只允许只读诊断，Release 才开放恢复写入。
 
-- Release：`restoreapp/build/outputs/apk/release/restoreapp-release.apk`
-- Debug：`restoreapp/build/outputs/apk/debug/restoreapp-debug.apk`
-- Android 测试包：`restoreapp/build/outputs/apk/androidTest/debug/restoreapp-debug-androidTest.apk`
-
-Debug 构建设置 `ALLOW_PARTITION_WRITES=false`，只允许只读诊断。Release 允许分区写入，不应仅为了测试界面而直接执行恢复。
-
-## Release 签名
-
-没有配置签名时，Release 使用 debug 签名并显示警告，不应用于正式发布。个人发布签名必须从项目外部加载，不要提交私钥或密码。
-
-在 `~/.gradle/gradle.properties` 中指定自己的配置文件：
-
-```properties
-PERSONAL_SIGNING_PROPERTIES=/path/to/private/key.properties
-```
-
-配置文件示例（请放在仓库外）：
-
-```properties
-storeFile=/path/to/private/release.jks
-storePassword=本机私密密码
-keyAlias=你的密钥别名
-keyPassword=本机私密密码
-```
-
-`PERSONAL_SIGNING_PROPERTIES` 也可以直接作为环境变量设置：
-
-```bash
-export PERSONAL_SIGNING_PROPERTIES=/path/to/private/key.properties
-```
-
-如果 `storeFile` 使用相对路径，构建脚本会先尝试相对于配置文件所在目录解析。也可以用环境变量显式覆盖密钥库位置：
-
-```bash
-export PERSONAL_SIGNING_STORE_FILE=/path/to/private/release.jks
-```
-
-验证 APK：
-
-```bash
-"$ANDROID_HOME/build-tools/37.0.0/apksigner.bat" verify --verbose --print-certs \
-  restoreapp/build/outputs/apk/release/restoreapp-release.apk
-```
-
-同一包名升级时必须保持签名一致。更换签名后，Android 会要求先卸载旧版本；卸载会删除旧 App 内部的导入副本，但不会删除 `Download` 中的原备份。
-
-## 测试
-
-### JVM 与构建测试
-
-```bash
-./gradlew :restore-core:test \
-  :restoreapp:testDebugUnitTest \
-  :restoreapp:assembleDebug \
-  :restoreapp:assembleDebugAndroidTest \
-  :restoreapp:assembleRelease
-```
-
-### 主机原生测试
-
-需要 Python 3 和支持 C11 的 `clang`。测试只使用临时普通文件，不访问块设备：
-
-```bash
-python tests/native/test_gpttool_range.py
-python tests/native/test_gpttool_fuzz.py
-python tests/native/test_partition_worker_restore.py
-```
-
-`CC` 环境变量可指定编译器。
-
-以下目录默认被 `.gitignore` 排除，用于放置你自己的真实备份夹具：
-
-- `ublbackup_*/`
-- `hnubl_ota_backup_*/`
-
-这些目录可能包含设备特定数据，不应直接提交。缺少可选真实夹具时，相关测试会自动跳过；其余测试仍可运行。
-
-### Android 仪器测试
-
-```bash
-adb install -r restoreapp/build/outputs/apk/debug/restoreapp-debug.apk
-adb install -r restoreapp/build/outputs/apk/androidTest/debug/restoreapp-debug-androidTest.apk
-adb shell am instrument -w -r \
-  wm.honor8e5restore.debug.test/androidx.test.runner.AndroidJUnitRunner
-```
-
-事务测试需要 Root，但只使用 `/data/local/tmp` 下的独立测试目录和测试进程，不接触真实 OTA 进程或真实恢复分区。
-
-## 备份选择逻辑
-
-1. 首先选择假回锁后的实际保锁 OTA 次数。
-2. `0 次`：只导入假回锁前的干净备份。
-3. `1 次`：先导入干净备份，再导入最后一次保锁 OTA 备份。
-4. `多次`：完成上述备份后，确认是否有倒数第二次备份：
-   - 有：导入倒数第二次备份，优先恢复双槽。
-   - 没有：明确确认另一槽和后续 OTA 风险后，仅恢复当前槽。
-5. 完成分步导入后，才能进行只读设备检查。
-
-`Download/hnubl` 中的 OTA 目录数量只作辅助核对。备份可能被删除、移动或重复，真实次数以及“最后一次/倒数第二次”的选择仍由用户负责。
-
-## 安全边界与限制
-
-- 只处理恢复计划需要的 ABL、init_boot、OTA 前级分区和 GPT。
-- 分区写入前必须停止 OTA 配套服务并取得事务锁，停止失败即中止。
-- 恢复前备份必须通过整份 ZIP 和逐条内容校验，校验失败不得开始写入。
-- 恢复完成后必须重新扫描，只有所有待恢复项目都消失才显示完成。
-- ABL 防回滚检查读取镜像声明值，不等于读取设备熔丝或 RPMB。
-- 镜像是否来自可信官方来源、是否与当前系统匹配，仍需用户确认。
-- 断电、其他工具并发修改、错误备份和不兼容镜像仍可能导致启动失败。
-
-出现部分写入后不要盲目重启或重复执行，应保留恢复前备份并先核验当前状态。项目验证使用临时文件、模拟故障和只读设备检查，未在真实设备上执行恢复写入。
-
-手工恢复背景记录见 [restore-fake-lock-recovery-guide.md](docs/restore-fake-lock-recovery-guide.md)。
-
-## 许可证与致谢
+## 许可证
 
 项目根目录保留原项目的 [LICENSE](LICENSE)。
 
 第三方组件通知见 [THIRD-PARTY-NOTICES.txt](third_party/THIRD-PARTY-NOTICES.txt)。BusyBox 使用 GPL-2.0，许可证和对应源代码、补丁材料位于 `third_party/toolchain/`。
 
-原作者仓库：<https://github.com/hawyn2018/honor_8e5_ubl>。
+手工恢复背景记录见 [restore-fake-lock-recovery-guide.md](docs/restore-fake-lock-recovery-guide.md)。
