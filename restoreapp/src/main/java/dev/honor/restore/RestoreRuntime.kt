@@ -28,6 +28,7 @@ object RestoreRuntime {
     val state = mutableStateOf(RestoreUiState())
 
     fun startHistory(mode: OtaHistoryMode) {
+        DiagnosticLog.i("History", "选择假回锁后的 OTA 次数：$mode")
         state.value = RestoreUiState(historyMode = mode, stage = "请按顺序导入假回锁前的干净备份")
     }
 
@@ -39,29 +40,38 @@ object RestoreRuntime {
             current.previousOtaChoice == PreviousOtaChoice.AVAILABLE && otaCount < 2 -> PreviousOtaChoice.UNASKED
             else -> current.previousOtaChoice
         }
+        val plan = RestorePlanner.plan(backups, current.device, current.historyMode)
+        backups.forEach(DiagnosticLog::backup)
+        DiagnosticLog.plan(plan)
         state.value = current.copy(backups = backups, previousOtaChoice = previous,
-            plan = RestorePlanner.plan(backups, current.device, current.historyMode), error = "", completed = false)
+            plan = plan, error = "", completed = false)
     }
 
     fun setDevice(scanned: ScannedDevice, backups: List<BackupSet>) {
+        DiagnosticLog.device(scanned.snapshot)
         val plan = RestorePlanner.plan(backups, scanned.snapshot, state.value.historyMode)
+        DiagnosticLog.plan(plan)
         state.value = state.value.copy(device = scanned.snapshot, plan = plan,
             confirmedHistoryMismatch = null, error = "", completed = false)
     }
 
     fun setPreviousOtaChoice(choice: PreviousOtaChoice) {
         val current = state.value
-        state.value = current.copy(previousOtaChoice = choice,
-            plan = RestorePlanner.plan(current.backups, current.device, current.historyMode), error = "", completed = false)
+        val plan = RestorePlanner.plan(current.backups, current.device, current.historyMode)
+        DiagnosticLog.i("History", "是否继续提供历史备份：$choice")
+        DiagnosticLog.plan(plan)
+        state.value = current.copy(previousOtaChoice = choice, plan = plan, error = "", completed = false)
     }
 
     fun confirmHistoryMismatch(message: String) {
         if (state.value.plan?.historyMismatch == message) {
+            DiagnosticLog.w("History", "用户确认 OTA 次数与目录差异：$message")
             state.value = state.value.copy(confirmedHistoryMismatch = message, error = "")
         }
     }
 
     fun appendLog(message: String) {
+        DiagnosticLog.i("Task", message)
         state.value = state.value.copy(logs = state.value.logs + message, stage = message)
     }
 

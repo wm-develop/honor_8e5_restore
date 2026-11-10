@@ -48,6 +48,8 @@ data class RestoreActions(
     val onChooseHistory: () -> Unit,
     val onPreviousChoice: () -> Unit,
     val onChooseOtaType: (OtaBackup) -> Unit,
+    val onShowLogs: () -> Unit,
+    val onExportLogs: () -> Unit,
     val onScan: () -> Unit,
     val onAcknowledgeIncomplete: () -> Unit,
     val onRemove: (BackupSet) -> Unit,
@@ -218,6 +220,11 @@ fun RestoreScreen(
             item {
                 Panel("任务日志") {
                     Text(state.stage, fontSize = 13.sp, lineHeight = 21.sp, fontWeight = FontWeight.SemiBold)
+                    Spacer(Modifier.height(10.dp))
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(onClick = actions.onShowLogs, enabled = !state.busy, modifier = Modifier.weight(1f)) { Text("查看完整日志") }
+                        Button(onClick = actions.onExportLogs, enabled = !state.busy, modifier = Modifier.weight(1f)) { Text("导出诊断日志") }
+                    }
                     if (state.backupSha256.isNotBlank()) {
                         Spacer(Modifier.height(8.dp))
                         Text("恢复前备份 SHA-256\n${state.backupSha256}", fontSize = 11.sp, lineHeight = 18.sp, fontFamily = FontFamily.Monospace)

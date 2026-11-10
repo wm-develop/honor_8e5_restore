@@ -23,6 +23,7 @@ class DeviceScanner(private val context: Context, private val shell: SuShell, pr
     fun scan(extraTargets: Set<String>): ScannedDevice {
         check(directory.isDirectory || directory.mkdirs()) { "设备扫描目录创建失败" }
         stage()
+        DiagnosticLog.i("Scan", "开始只读设备扫描")
         val names = linkedSetOf("abl_a", "abl_b", "init_boot_a", "init_boot_b", "vbmeta_a", "vbmeta_b", "efisp", "userdata")
         names += extraTargets.filter { it != "efisp" && !it.startsWith("abl_") && !it.startsWith("init_boot_") }
         val identities = names.mapNotNull { name -> identity(name, required = name != "efisp") }.associateBy { it.substringBefore('|') }
@@ -74,6 +75,7 @@ class DeviceScanner(private val context: Context, private val shell: SuShell, pr
         val snapshot = DeviceSnapshot(properties.getValue("SLOT"), properties.getValue("DISPLAY"), properties.getValue("FINGERPRINT"),
             partitions, disk, gpt, values.getValue("FS_BYTES").toLong(), properties["OTA_MARKER"].orEmpty(),
             otaDirectories.first, otaDirectories.second, RestoreTransaction.isIncomplete(shell), initBootChainKeys)
+        DiagnosticLog.device(snapshot)
         return ScannedDevice(snapshot, images, gptFile, directory)
     }
 

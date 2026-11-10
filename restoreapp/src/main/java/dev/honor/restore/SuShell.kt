@@ -36,7 +36,9 @@ class SuShell {
             check(result.exitCode == 0) { result.output }
             checkNotNull(validatedSu)
         }
-        return execute(su, command, null, timeoutSeconds).first
+        return execute(su, command, null, timeoutSeconds).first.also { result ->
+            DiagnosticLog.i("Shell", "$command\n退出码=${result.exitCode}\n${result.output}")
+        }
     }
 
     @Synchronized
@@ -46,6 +48,7 @@ class SuShell {
             checkNotNull(validatedSu)
         }
         val (result, error) = execute(su, command, destination, timeoutSeconds)
+        DiagnosticLog.i("ShellCapture", "$command\n退出码=${result.exitCode}\n文件=${destination.name} · 字节=${destination.length()}\n${result.output}$error")
         return ShellResult(result.exitCode, (result.output + error).ifBlank { result.output })
     }
 

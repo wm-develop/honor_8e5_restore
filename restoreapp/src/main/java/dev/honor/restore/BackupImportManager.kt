@@ -15,11 +15,14 @@ class BackupImportManager(private val context: Context) {
     private val root = File(context.filesDir, "imports")
     private val safeName = Regex("[A-Za-z0-9_.-]+")
 
+    init { DiagnosticLog.init(context) }
+
     fun importTree(tree: Uri): BackupSet {
         require(tree.scheme == "content") { "备份目录 URI 无效" }
         val documents = children(tree)
         require(documents.isNotEmpty()) { "所选目录为空或不可读取" }
         val displayName = DocumentsContract.getTreeDocumentId(tree).substringAfterLast(':').ifBlank { "导入备份" }
+        DiagnosticLog.i("Import", "开始导入 $displayName · ${documents.size} 个目录项")
         val id = UUID.randomUUID().toString()
         val staging = File(root, ".$id.partial")
         val destination = File(root, id)
@@ -61,6 +64,7 @@ class BackupImportManager(private val context: Context) {
             }
             staging.delete()
             val verified = BackupVerifier.verify(destination)
+            DiagnosticLog.backup(verified)
             File(destination, ".import-name").writeText(displayName)
             committed = true
             return when (verified) {
@@ -82,7 +86,7 @@ class BackupImportManager(private val context: Context) {
                         is NormalBackup -> backup.copy(displayName = File(directory, ".import-name").takeIf { it.isFile }?.readText() ?: backup.displayName)
                         is OtaBackup -> backup.copy(displayName = File(directory, ".import-name").takeIf { it.isFile }?.readText() ?: backup.displayName)
                     }
-                }.getOrNull()
+                }.onFailure { DiagnosticLog.e("Import", "无法重新读取导入副本 ${directory.name}", it) }.getOrNull()
             }
             .sortedBy { it.timestamp }
     }
@@ -96,12 +100,14 @@ class BackupImportManager(private val context: Context) {
         val marker = File(directory, ".ota-type")
         temporary.copyTo(marker, overwrite = true)
         check(temporary.delete()) { "OTA 类型临时文件清理失败" }
+        DiagnosticLog.i("Import", "确认 ${backup.displayName} 的 OTA 类型：$type")
         return BackupVerifier.verify(directory) as OtaBackup
     }
 
     fun remove(backup: BackupSet) {
         val directory = backup.directory.canonicalFile
         require(directory.parentFile == root.canonicalFile && Regex("[a-f0-9-]{36}").matches(directory.name)) { "导入目录身份无效" }
+        DiagnosticLog.i("Import", "移除 App 内导入副本：${backup.displayName}")
         check(directory.deleteRecursively()) { "无法删除导入备份" }
     }
 

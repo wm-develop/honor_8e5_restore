@@ -28,9 +28,12 @@ class RestoreTransaction(
             chmod 700 ${quote(lock)} ${quote(lock)}/pid
         """.trimIndent()
         check(shell.run(script).exitCode == 0) { "另一个恢复任务正在运行，或恢复事务锁状态异常" }
+        DiagnosticLog.i("Transaction", "取得恢复事务锁 · ownerPid=$ownerPid")
     }
 
-    fun release(): ShellResult = shell.run("rm -f ${quote(lock)}/pid && rmdir ${quote(lock)}")
+    fun release(): ShellResult = shell.run("rm -f ${quote(lock)}/pid && rmdir ${quote(lock)}").also {
+        DiagnosticLog.i("Transaction", "释放恢复事务锁 · exit=${it.exitCode}")
+    }
 
     fun mark(stage: String) {
         val temporary = "$stateDir/INCOMPLETE.tmp"
@@ -40,6 +43,7 @@ class RestoreTransaction(
             "printf '%s' ${quote(text)} > ${quote(temporary)} && chmod 600 ${quote(temporary)} && " +
             "sync && mv -f ${quote(temporary)} ${quote(marker)} && sync")
         check(result.exitCode == 0) { "无法持久化恢复中断状态：${result.output}" }
+        DiagnosticLog.i("Transaction", "持久化中断状态：$stage")
     }
 
     fun complete() = archive("COMPLETED")

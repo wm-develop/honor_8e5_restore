@@ -37,6 +37,7 @@ class MainActivity : ComponentActivity() {
     private var pendingRemove by mutableStateOf<BackupSet?>(null)
     private var pendingImport: BackupRequest? = null
     private var pendingOtaType by mutableStateOf<OtaBackup?>(null)
+    private var showLogDialog by mutableStateOf(false)
 
     private val importLauncher = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         val expected = pendingImport
@@ -48,9 +49,13 @@ class MainActivity : ComponentActivity() {
     private val backupLauncher = registerForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri ->
         if (uri != null) RestoreService.execute(this, uri)
     }
+    private val logExportLauncher = registerForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri ->
+        if (uri != null) exportDiagnostics(uri)
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        DiagnosticLog.init(this)
         enableEdgeToEdge()
         setContent {
             MiuixTheme {
@@ -62,6 +67,11 @@ class MainActivity : ComponentActivity() {
                         onChooseHistory = { if (!state.busy) showHistoryDialog = true },
                         onPreviousChoice = { if (!state.busy) showPreviousDialog = true },
                         onChooseOtaType = { if (!state.busy) pendingOtaType = it },
+                        onShowLogs = { showLogDialog = true },
+                        onExportLogs = {
+                            val name = "hnubl-restore-diagnostics-" + SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date()) + ".zip"
+                            logExportLauncher.launch(name)
+                        },
                         onScan = { if (!state.busy) showScanDialog = true },
                         onAcknowledgeIncomplete = { if (!state.busy) showIncompleteDialog = true },
                         onRemove = { if (!state.busy) pendingRemove = it },
@@ -103,6 +113,7 @@ class MainActivity : ComponentActivity() {
                 pendingOtaType?.let { backup ->
                     OtaTypeDialog(backup, onSelect = { type -> selectOtaType(backup, type) }, onDismiss = { pendingOtaType = null })
                 }
+                if (showLogDialog) FullLogDialog(onDismiss = { showLogDialog = false })
                 if (showScanDialog) {
                     ScanConfirmationDialog(
                         onConfirm = {
@@ -166,6 +177,7 @@ class MainActivity : ComponentActivity() {
                 pendingImport = null
                 pendingOtaType = null
             } catch (error: Throwable) {
+                DiagnosticLog.e("UI", "操作失败", error)
                 RestoreRuntime.state.value = RestoreRuntime.state.value.copy(error = error.message ?: error.javaClass.simpleName)
             } finally {
                 RestoreRuntime.state.value = RestoreRuntime.state.value.copy(busy = false)
@@ -265,6 +277,7 @@ class MainActivity : ComponentActivity() {
                     else -> "请按当前步骤继续"
                 })
             } catch (error: Throwable) {
+                DiagnosticLog.e("UI", "操作失败", error)
                 RestoreRuntime.state.value = RestoreRuntime.state.value.copy(error = error.message ?: error.javaClass.simpleName)
             } finally {
                 RestoreRuntime.state.value = RestoreRuntime.state.value.copy(busy = false)
@@ -299,6 +312,25 @@ class MainActivity : ComponentActivity() {
                 pendingOtaType = null
                 RestoreRuntime.state.value = RestoreRuntime.state.value.copy(stage = "导入副本已移除，请按当前步骤继续")
             } catch (error: Throwable) {
+                DiagnosticLog.e("UI", "操作失败", error)
+                RestoreRuntime.state.value = RestoreRuntime.state.value.copy(error = error.message ?: error.javaClass.simpleName)
+            } finally {
+                RestoreRuntime.state.value = RestoreRuntime.state.value.copy(busy = false)
+            }
+        }
+    }
+
+    private fun exportDiagnostics(uri: Uri) {
+        if (RestoreRuntime.state.value.busy) return
+        lifecycleScope.launch {
+            RestoreRuntime.state.value = RestoreRuntime.state.value.copy(busy = true, error = "", stage = "正在导出并校验诊断日志 ZIP")
+            try {
+                val hash = withContext(Dispatchers.IO) { DiagnosticExporter.export(this@MainActivity, uri) }
+                DiagnosticLog.i("Export", "诊断日志导出并回读校验成功 · SHA-256=$hash")
+                RestoreRuntime.state.value = RestoreRuntime.state.value.copy(stage = "诊断日志已导出：$hash")
+            } catch (error: Throwable) {
+                DiagnosticLog.e("Export", "诊断日志导出失败", error)
+                DiagnosticLog.e("UI", "操作失败", error)
                 RestoreRuntime.state.value = RestoreRuntime.state.value.copy(error = error.message ?: error.javaClass.simpleName)
             } finally {
                 RestoreRuntime.state.value = RestoreRuntime.state.value.copy(busy = false)

@@ -23,10 +23,16 @@ import java.util.UUID
 class RestoreService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
+    override fun onCreate() {
+        super.onCreate()
+        DiagnosticLog.init(this)
+    }
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val action = intent?.action ?: return START_NOT_STICKY
+        DiagnosticLog.i("Service", "收到任务 action=$action · startId=$startId")
         if (RestoreRuntime.state.value.busy) return START_NOT_STICKY
         RestoreRuntime.state.value = RestoreRuntime.state.value.copy(busy = true, error = "", completed = false)
         startForeground()
@@ -40,6 +46,7 @@ class RestoreService : Service() {
                     ACTION_ACKNOWLEDGE_INCOMPLETE -> acknowledgeIncomplete()
                 }
             } catch (error: Throwable) {
+                DiagnosticLog.e("Service", "任务失败 action=$action", error)
                 Log.e("RestoreService", "Task failed: $action", error)
                 RestoreRuntime.state.value = RestoreRuntime.state.value.copy(
                     error = error.message ?: error.javaClass.simpleName, stage = "任务已停止")
@@ -98,9 +105,11 @@ class RestoreService : Service() {
         stage("正在导出并逐条校验当前状态备份；备份成功前不会写入分区")
         val backupHash = withContext(Dispatchers.IO) { ExecutionBackup.export(this@RestoreService, destination, fresh, freshPlan) }
         RestoreRuntime.state.value = RestoreRuntime.state.value.copy(backupSha256 = backupHash)
+        DiagnosticLog.i("Backup", "恢复前备份 SHA-256=$backupHash")
         stage("恢复前备份已通过字节与逐条内容校验，开始事务保护和固定恢复源")
         withContext(Dispatchers.IO) {
             RestoreExecutor(shell, scanner, backups, freshPlan, fresh, log = { message ->
+                DiagnosticLog.i("Executor", message)
                 RestoreRuntime.state.value = RestoreRuntime.state.value.copy(stage = message, logs = RestoreRuntime.state.value.logs + message)
             }).execute()
         }
@@ -123,6 +132,7 @@ class RestoreService : Service() {
     }
 
     private suspend fun stage(message: String) {
+        DiagnosticLog.i("Service", message)
         RestoreRuntime.state.value = RestoreRuntime.state.value.copy(stage = message, logs = RestoreRuntime.state.value.logs + message)
     }
 
