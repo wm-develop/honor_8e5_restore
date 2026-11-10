@@ -18,7 +18,7 @@
 
 ![原作者关于不加入恢复功能的说明](docs/assets/hnubl-author-restore-feature.jpg)
 
-感谢原作者及原项目提供的分区研究基础，也感谢 BusyBox、Miuix、AndroidX、Kotlin 等第三方项目的贡献者。
+感谢原作者及原项目提供的分区研究基础，也感谢 青木信史 开发的 MagicRoot 等第三方项目的贡献者。
 
 ## 使用前必须知道
 
