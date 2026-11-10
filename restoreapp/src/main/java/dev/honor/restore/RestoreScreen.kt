@@ -47,6 +47,7 @@ data class RestoreActions(
     val onRequestBackup: (BackupRequest) -> Unit,
     val onChooseHistory: () -> Unit,
     val onPreviousChoice: () -> Unit,
+    val onChooseOtaType: (OtaBackup) -> Unit,
     val onScan: () -> Unit,
     val onAcknowledgeIncomplete: () -> Unit,
     val onRemove: (BackupSet) -> Unit,
@@ -94,13 +95,21 @@ fun RestoreScreen(
                     RestoreFlow.nextRequest(state.backups, state.historyMode, state.previousOtaChoice)?.let { request ->
                         Button(onClick = { actions.onRequestBackup(request) }, enabled = !state.busy,
                             modifier = Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColorsPrimary()) {
-                            Text(backupRequestText(request))
+                            Text(backupRequestText(request, RestoreFlow.nextOtaOrdinal(state.backups)))
                         }
                     }
-                    if (RestoreFlow.needsPreviousChoice(state.backups, state.historyMode, state.previousOtaChoice)) {
+                    RestoreFlow.untypedOta(state.backups)?.let { backup ->
+                        Button(onClick = { actions.onChooseOtaType(backup) }, enabled = !state.busy,
+                            modifier = Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColorsPrimary()) {
+                            Text("确认本次 OTA 是大版本还是小补丁")
+                        }
+                    }
+                    if (RestoreFlow.needsPreviousChoice(state.backups, state.historyMode, state.previousOtaChoice) ||
+                        RestoreFlow.canStopAddingHistory(state.backups, state.previousOtaChoice)) {
                         Button(onClick = actions.onPreviousChoice, enabled = !state.busy,
                             modifier = Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColorsPrimary()) {
-                            Text("确认是否有倒数第二次保锁 OTA 备份")
+                            Text(if (RestoreFlow.needsPreviousChoice(state.backups, state.historyMode, state.previousOtaChoice))
+                                "确认是否有倒数第二次保锁 OTA 备份" else "没有更早的大版本备份？检查可选方案")
                         }
                     }
                 }
@@ -130,7 +139,7 @@ fun RestoreScreen(
                         if (device.incompleteRestore) {
                             Spacer(Modifier.height(12.dp))
                             Text("检测到上次恢复中断或结果未复核。清除标记前必须人工确认启动和分区状态。",
-                                fontSize = 12.sp, lineHeight = 20.sp, color = MiuixTheme.colorScheme.error)
+                                fontSize = 14.sp, lineHeight = 22.sp, color = MiuixTheme.colorScheme.error, fontWeight = FontWeight.Bold)
                             Spacer(Modifier.height(8.dp))
                             Button(onClick = actions.onAcknowledgeIncomplete, enabled = !state.busy, modifier = Modifier.fillMaxWidth()) {
                                 Text("人工复核中断状态")
@@ -144,10 +153,11 @@ fun RestoreScreen(
                     Panel("4 · 恢复计划") {
                         Text(when {
                             plan.status != RestorePlanStatus.READY -> "现在还不能恢复"
-                            plan.strategy == RestoreStrategy.CURRENT_SLOT_ONLY -> "仅恢复当前槽（降级方案）"
+                            plan.strategy == RestoreStrategy.CURRENT_SLOT_ONLY -> "仅恢复当前槽（高风险降级方案）"
+                            plan.warnings.isNotEmpty() -> "候选计划已生成，必须确认风险"
                             else -> "可以进入恢复确认"
-                        }, fontSize = 16.sp, fontWeight = FontWeight.SemiBold,
-                            color = if (plan.status == RestorePlanStatus.READY) MiuixTheme.colorScheme.primary else MiuixTheme.colorScheme.error)
+                        }, fontSize = 16.sp, fontWeight = FontWeight.Bold,
+                            color = if (plan.status != RestorePlanStatus.READY || plan.warnings.isNotEmpty()) MiuixTheme.colorScheme.error else MiuixTheme.colorScheme.primary)
                         if (plan.images.isEmpty() && plan.gpt == null) {
                             Spacer(Modifier.height(8.dp))
                             Text("完成备份导入和只读检查后，这里会列出准备恢复的内容。", fontSize = 12.sp, lineHeight = 20.sp)
@@ -173,7 +183,7 @@ fun RestoreScreen(
                     MessageCard("仅恢复当前槽的重要风险", plan.warnings.distinct(), error = true)
                 }
                 if (plan.strategy != RestoreStrategy.CURRENT_SLOT_ONLY && plan.warnings.isNotEmpty()) item {
-                    MessageCard("请人工核对", plan.warnings.map(RestoreGuidance::forWarning).distinct(), error = false)
+                    MessageCard("必须由你确认并承担的风险", plan.warnings.map(RestoreGuidance::forWarning).distinct(), error = true)
                 }
                 plan.historyMismatch?.let { mismatch ->
                     item { MessageCard("OTA 次数与目录不一致", listOf(mismatch), error = true) }
@@ -187,6 +197,9 @@ fun RestoreScreen(
                 Panel("5 · 执行与重启") {
                     Text("执行前会重新扫描并导出当前状态 ZIP。先恢复启动镜像并回读，最后恢复 GPT；不会自动重启、切槽、清数据或官方回锁。",
                         fontSize = 12.sp, lineHeight = 20.sp, color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
+                    Spacer(Modifier.height(8.dp))
+                    Text("写入过程中断电、强制重启或强制关闭 App 可能造成设备无法启动。请保持电量和连接稳定，不要中断。",
+                        fontSize = 14.sp, lineHeight = 22.sp, color = MiuixTheme.colorScheme.error, fontWeight = FontWeight.Bold)
                     Spacer(Modifier.height(12.dp))
                     Button(onClick = actions.onExecute,
                         enabled = !state.busy && flowComplete && RestoreRuntime.canReview(state) &&
@@ -225,10 +238,11 @@ fun RestoreScreen(
 
 @Composable
 private fun BackupCard(backup: BackupSet, backups: List<BackupSet>, enabled: Boolean, onRemove: () -> Unit) {
-    val latestOtaTimestamp = backups.filterIsInstance<OtaBackup>().maxOfOrNull { it.timestamp }
+    val orderedOta = backups.filterIsInstance<OtaBackup>().sortedByDescending { it.timestamp }
+    val ordinal = orderedOta.indexOfFirst { it.id == backup.id } + 1
     Panel(when (backup) {
         is NormalBackup -> "干净备份 · ${backup.displayName}"
-        is OtaBackup -> "${if (backup.timestamp == latestOtaTimestamp) "最后一次" else "倒数第二次"}保锁 OTA 备份 · ${backup.displayName}"
+        is OtaBackup -> "${if (ordinal == 1) "最后一次" else "倒数第 $ordinal 次"}保锁 OTA 备份 · ${backup.displayName}"
     }) {
         when (backup) {
             is NormalBackup -> Column {
@@ -241,7 +255,11 @@ private fun BackupCard(backup: BackupSet, backups: List<BackupSet>, enabled: Boo
                 Text("这次升级在 ${backup.currentSlot.uppercase()} → ${backup.targetSlot.uppercase()} 槽之间进行。",
                     fontSize = 13.sp, lineHeight = 21.sp, fontWeight = FontWeight.SemiBold,
                     color = MiuixTheme.colorScheme.primary)
-                Text("实际写入：${backup.writes.joinToString { it.target }}", fontSize = 12.sp, lineHeight = 20.sp,
+                Text(otaPackageTypeText(backup.packageType), fontSize = 14.sp, lineHeight = 22.sp,
+                    fontWeight = if (backup.packageType == dev.honor.restore.core.OtaPackageType.MAJOR) FontWeight.SemiBold else FontWeight.Bold,
+                    color = if (backup.packageType == dev.honor.restore.core.OtaPackageType.MAJOR)
+                        MiuixTheme.colorScheme.primary else MiuixTheme.colorScheme.error)
+                Text("hnubl 实际写入：${backup.writes.joinToString { it.target }}", fontSize = 12.sp, lineHeight = 20.sp,
                     color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
             }
         }
@@ -266,10 +284,14 @@ private fun ConfirmationDialog(state: RestoreUiState, onDismiss: () -> Unit, onC
     Dialog(onDismissRequest = onDismiss) {
         Card(modifier = Modifier.fillMaxWidth(), cornerRadius = 24.dp, insideMargin = PaddingValues(20.dp)) {
             Column(Modifier.verticalScroll(rememberScrollState())) {
-                Text(if (currentSlotOnly) "确认仅恢复当前槽" else "确认原厂恢复", fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                Text(if (currentSlotOnly) "确认仅恢复当前槽" else if (warnings.any { it.contains("小补丁") || it.contains("跨槽") })
+                    "确认风险承担恢复" else "确认恢复计划", fontSize = 20.sp, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(10.dp))
                 Text("将写入 ${plan?.images?.size ?: 0} 个分区镜像${if (plan?.gpt != null) "，并恢复 GPT 删除 efisp" else ""}。执行前仍会重新扫描，任何差异都会停止。",
                     fontSize = 13.sp, lineHeight = 21.sp)
+                Spacer(Modifier.height(8.dp))
+                Text("写入过程中断电、强制重启或强制关闭 App 可能造成分区部分写入，导致设备无法启动。请保证电量和连接稳定，不要中断操作。",
+                    fontSize = 14.sp, lineHeight = 22.sp, color = MiuixTheme.colorScheme.error, fontWeight = FontWeight.Bold)
                 if (currentSlotOnly) {
                     Spacer(Modifier.height(8.dp))
                     Text("另一槽不会被恢复。删除共享 efisp 后，它可能无法启动，后续必须使用包含 ABL/init_boot 的官方全量包或先单独修复。",
@@ -281,7 +303,7 @@ private fun ConfirmationDialog(state: RestoreUiState, onDismiss: () -> Unit, onC
                         color = MiuixTheme.colorScheme.error)
                     warnings.forEach {
                         Spacer(Modifier.height(6.dp))
-                        Text("· $it", fontSize = 12.sp, lineHeight = 20.sp, color = MiuixTheme.colorScheme.error)
+                        Text("· $it", fontSize = 14.sp, lineHeight = 22.sp, color = MiuixTheme.colorScheme.error, fontWeight = FontWeight.Bold)
                     }
                     ConfirmLine("我已逐项阅读并核对以上警告，确认恢复来源适用于当前系统", warningsConfirmed) { warningsConfirmed = it }
                 }
@@ -312,7 +334,8 @@ private fun ConfirmLine(text: String, checked: Boolean, onChange: (Boolean) -> U
     Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
         Switch(checked = checked, onCheckedChange = onChange)
         Spacer(Modifier.height(8.dp))
-        Text(text, modifier = Modifier.padding(start = 10.dp), fontSize = 12.sp, lineHeight = 20.sp)
+        Text(text, modifier = Modifier.padding(start = 10.dp), fontSize = 14.sp, lineHeight = 22.sp,
+            color = MiuixTheme.colorScheme.error, fontWeight = FontWeight.Bold)
     }
 }
 
@@ -332,8 +355,9 @@ private fun MessageCard(title: String, messages: List<String>, error: Boolean) {
     if (messages.isEmpty()) return
     Panel(title) {
         messages.forEach {
-            Text("· $it", fontSize = 12.sp, lineHeight = 20.sp,
-                color = if (error) MiuixTheme.colorScheme.error else MiuixTheme.colorScheme.onSurfaceVariantSummary)
+            Text("· $it", fontSize = if (error) 14.sp else 12.sp, lineHeight = if (error) 22.sp else 20.sp,
+                color = if (error) MiuixTheme.colorScheme.error else MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                fontWeight = if (error) FontWeight.Bold else FontWeight.Normal)
             Spacer(Modifier.height(6.dp))
         }
     }

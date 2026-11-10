@@ -51,6 +51,13 @@ class RestoreExecutor(
         plan.images.forEach { operation ->
             val source = sourceFile(operation)
             check(Hashes.sha256(source) == operation.sourceSha256 && source.length() == operation.sourceBytes) { "${operation.target} 的恢复源在固定前发生变化" }
+            if (operation.target.startsWith("init_boot_")) {
+                val result = dev.honor.restore.core.BootImageVerifier.inspectBoot(source)
+                check(result.signatureValid && result.contentValid) { "${operation.target} 的 init_boot AVB 校验失败：${result.detail}" }
+                check(result.publicKeySha256 == scanned.snapshot.initBootChainKeys[operation.target.substringAfterLast('_')]) {
+                    "${operation.target} 的 init_boot 公钥与设备链式公钥不一致"
+                }
+            }
             checkAblRollback(operation, source)
             pin(source, "${operation.target}.img", operation.sourceSha256)
         }
@@ -82,6 +89,7 @@ class RestoreExecutor(
     }
 
     private fun writeImage(operation: ImageRestoreOperation) {
+        check(dev.honor.restore.core.OtaWritePolicy.isRestoreImageTarget(operation.target)) { "${operation.target} 不在允许恢复的写入范围内" }
         val fields = operation.targetIdentity.split('|')
         check(fields.size == 7 && fields[0] == operation.target) { "${operation.target} 目标身份记录无效" }
         check(operation.sourceBytes == operation.targetBytes && operation.targetBytes == fields[4].toLong()) { "${operation.target} 只接受完整分区镜像" }

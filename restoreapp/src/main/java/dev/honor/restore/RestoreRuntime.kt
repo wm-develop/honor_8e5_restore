@@ -71,7 +71,7 @@ object RestoreRuntime {
 
     fun requireReadyPlan(): RestorePlan {
         check(RestoreFlow.isComplete(state.value.backups, state.value.historyMode, state.value.previousOtaChoice)) {
-            "请先按顺序完成备份导入和倒数第二次 OTA 备份选择"
+            "请先按顺序完成备份导入、更新类型选择及所需的 OTA 历史确认"
         }
         val plan = state.value.plan?.takeIf { it.status == RestorePlanStatus.READY }
             ?: error("当前恢复计划尚未满足执行条件")

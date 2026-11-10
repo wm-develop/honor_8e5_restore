@@ -38,6 +38,16 @@ object RestoreGuidance {
             message.contains("GPT 表头存在") || message.contains("GPT 第") || message.contains("efisp 与 userdata 不相邻") ||
             message.contains("干净 GPT 与当前磁盘身份") || message.contains("干净备份的原始末端") ->
             "假回锁产生的 efisp 和 userdata 末端差异是正常的，恢复工具本来就会处理。此次阻止是因为还发现了其他差异。请确认干净备份来自同一设备、同一磁盘且确实在假回锁前生成；不要盲目换 GPT 刷写。具体差异：$message"
+        message.contains("未通过 AVB") ->
+            "这份 init_boot 不能作为干净恢复来源：它可能是 Root 修改版，或签名、原始内容哈希已不匹配。请换用通过校验的原始镜像，不要仅凭它来自 OTA 备份就继续。"
+        message.contains("没有证据证明该槽修补前") ->
+            "这是跨槽复用，必须证明目标槽修补前与来源槽使用同一份 init_boot。App 会比对 Root 镜像保存的 stock_image.sha1；没有匹配证据时会停止，而不是猜测两槽可以共用。"
+        message.contains("尚未导入此前的大版本") ->
+            "最近连续是小补丁，当前没有可用于该风险方案的大版本镜像。请继续导入倒数第三次、第四次……直到大版本；若无法提供，请停止恢复，不要直接写入小补丁备份里的 Root 镜像。"
+        message.contains("确认它是大版本还是小补丁") ->
+            "在每份 OTA 备份卡片上方完成更新类型选择。大版本和小补丁采用不同的恢复来源；选择小补丁还需要确认未更新 ABL/init_boot 的风险。"
+        message.contains("vbmeta") ->
+            "App 需要读取双槽 vbmeta 并验证其签名，以核对 init_boot 的链式公钥。此次检查未通过，请不要写入或重启，先保留诊断信息。"
         message.startsWith("最近 OTA 备份缺少目标槽镜像") || message.contains("覆盖前公开备份缺失") ->
             "最近一次保锁 OTA 备份不完整。请重新导入完整的 hnubl_ota_backup_… 文件夹，包含其中的 json、img 和写入日志，不能只导入部分文件。"
         message.contains("缺少前一次 OTA 的原厂候选") || message.contains("请补充早期 OTA") ->

@@ -17,6 +17,7 @@ import dev.honor.restore.core.BackupSet
 import dev.honor.restore.core.NormalBackup
 import dev.honor.restore.core.OtaBackup
 import dev.honor.restore.core.OtaHistoryMode
+import dev.honor.restore.core.OtaPackageType
 import dev.honor.restore.core.RestorePlanStatus
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -35,6 +36,7 @@ class MainActivity : ComponentActivity() {
     private var showIncompleteDialog by mutableStateOf(false)
     private var pendingRemove by mutableStateOf<BackupSet?>(null)
     private var pendingImport: BackupRequest? = null
+    private var pendingOtaType by mutableStateOf<OtaBackup?>(null)
 
     private val importLauncher = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         val expected = pendingImport
@@ -59,6 +61,7 @@ class MainActivity : ComponentActivity() {
                         onRequestBackup = ::requestBackup,
                         onChooseHistory = { if (!state.busy) showHistoryDialog = true },
                         onPreviousChoice = { if (!state.busy) showPreviousDialog = true },
+                        onChooseOtaType = { if (!state.busy) pendingOtaType = it },
                         onScan = { if (!state.busy) showScanDialog = true },
                         onAcknowledgeIncomplete = { if (!state.busy) showIncompleteDialog = true },
                         onRemove = { if (!state.busy) pendingRemove = it },
@@ -83,6 +86,7 @@ class MainActivity : ComponentActivity() {
                 }
                 if (showPreviousDialog) {
                     PreviousOtaDialog(
+                        ordinal = RestoreFlow.nextOtaOrdinal(state.backups),
                         onAvailable = {
                             showPreviousDialog = false
                             pendingImport = BackupRequest.PREVIOUS_OTA
@@ -91,10 +95,13 @@ class MainActivity : ComponentActivity() {
                         onMissing = {
                             showPreviousDialog = false
                             RestoreRuntime.setPreviousOtaChoice(PreviousOtaChoice.MISSING)
-                            RestoreRuntime.appendLog("已确认没有倒数第二次备份，采用仅恢复当前槽的降级方案")
+                            RestoreRuntime.appendLog("已确认不再提供更多历史备份，将按当前可用镜像审查风险承担方案")
                         },
                         onDismiss = { showPreviousDialog = false },
                     )
+                }
+                pendingOtaType?.let { backup ->
+                    OtaTypeDialog(backup, onSelect = { type -> selectOtaType(backup, type) }, onDismiss = { pendingOtaType = null })
                 }
                 if (showScanDialog) {
                     ScanConfirmationDialog(
@@ -125,7 +132,7 @@ class MainActivity : ComponentActivity() {
                         onDismiss = { pendingRemove = null })
                 }
                 val mismatch = state.plan?.historyMismatch
-                if (!state.busy && !showHistoryDialog && mismatch != null && state.confirmedHistoryMismatch != mismatch) {
+                if (!state.busy && !showHistoryDialog && pendingOtaType == null && mismatch != null && state.confirmedHistoryMismatch != mismatch) {
                     HistoryMismatchDialog(mismatch, state.device?.otaDirectoryNames.orEmpty(),
                         onConfirm = {
                             RestoreRuntime.confirmHistoryMismatch(mismatch)
@@ -157,6 +164,7 @@ class MainActivity : ComponentActivity() {
                 showConfirmation = false
                 pendingRemove = null
                 pendingImport = null
+                pendingOtaType = null
             } catch (error: Throwable) {
                 RestoreRuntime.state.value = RestoreRuntime.state.value.copy(error = error.message ?: error.javaClass.simpleName)
             } finally {
@@ -204,23 +212,23 @@ class MainActivity : ComponentActivity() {
                         "当前步骤只接受你确认的实际最后一次保锁 OTA 备份"
                     }
                     BackupRequest.PREVIOUS_OTA -> {
-                        require(candidate is OtaBackup) { "当前步骤只接受倒数第二次保锁 OTA 备份" }
+                        require(candidate is OtaBackup) { "当前步骤只接受按倒序排列的前一次保锁 OTA 备份" }
                         val latest = current.backups.filterIsInstance<OtaBackup>().maxByOrNull { it.timestamp }
                             ?: error("请先导入最后一次保锁 OTA 备份")
                         require(RestoreFlow.validPrevious(latest, candidate)) {
-                            "这份备份不能紧接在所选最后一次之前：它必须更早，且目标槽应等于最后一次备份的运行槽"
+                            "这份备份不能紧接在所选备份之前：它必须更早，且目标槽应等于后一次备份的运行槽"
                         }
                     }
                 }
                 accepted = true
                 val all = withContext(Dispatchers.IO) { imports.loadAll() }
                 RestoreRuntime.setBackups(all)
-                if (expected == BackupRequest.PREVIOUS_OTA) RestoreRuntime.setPreviousOtaChoice(PreviousOtaChoice.AVAILABLE)
-                RestoreRuntime.state.value = RestoreRuntime.state.value.copy(stage = when (expected) {
-                    BackupRequest.CLEAN -> if (current.historyMode == OtaHistoryMode.NONE) "干净备份已就绪，请进行只读检查" else "干净备份已就绪，下一步导入实际最后一次 OTA 备份"
-                    BackupRequest.LATEST_OTA -> if (current.historyMode == OtaHistoryMode.MULTIPLE) "最后备份已就绪，请确认是否有倒数第二次备份" else "备份已就绪，请进行只读检查"
-                    BackupRequest.PREVIOUS_OTA -> "最近两次 OTA 备份已就绪，可以进行双槽恢复检查"
-                })
+                if (candidate is OtaBackup) {
+                    pendingOtaType = all.filterIsInstance<OtaBackup>().singleOrNull { it.id == candidate.id } ?: candidate
+                    RestoreRuntime.state.value = RestoreRuntime.state.value.copy(stage = "备份已导入，请确认这次是大版本还是小补丁")
+                } else {
+                    RestoreRuntime.state.value = RestoreRuntime.state.value.copy(stage = "干净备份已就绪，请按下一步提示继续")
+                }
             } catch (error: Throwable) {
                 val cleanup = if (accepted) null else imported?.let {
                     runCatching { withContext(Dispatchers.IO) { imports.remove(it) } }.exceptionOrNull()
@@ -233,14 +241,45 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun selectOtaType(backup: OtaBackup, type: OtaPackageType) {
+        if (RestoreRuntime.state.value.busy) return
+        lifecycleScope.launch {
+            RestoreRuntime.state.value = RestoreRuntime.state.value.copy(busy = true, error = "", stage = "正在保存本次 OTA 类型与风险选择")
+            try {
+                withContext(Dispatchers.IO) { imports.setOtaType(backup, type) }
+                val all = withContext(Dispatchers.IO) { imports.loadAll() }
+                RestoreRuntime.setBackups(all)
+                val current = RestoreRuntime.state.value
+                if (current.historyMode == OtaHistoryMode.MULTIPLE && current.previousOtaChoice == PreviousOtaChoice.UNASKED &&
+                    all.count { it is OtaBackup } >= 2) {
+                    RestoreRuntime.setPreviousOtaChoice(PreviousOtaChoice.AVAILABLE)
+                }
+                pendingOtaType = null
+                RestoreRuntime.state.value = RestoreRuntime.state.value.copy(stage = when {
+                    RestoreFlow.isComplete(all, current.historyMode, RestoreRuntime.state.value.previousOtaChoice) ->
+                        "备份与更新类型已确认，请进行只读设备检查"
+                    RestoreFlow.nextRequest(all, current.historyMode, RestoreRuntime.state.value.previousOtaChoice) == BackupRequest.PREVIOUS_OTA ->
+                        "最近历史仍是小补丁，请继续导入倒数第 ${RestoreFlow.nextOtaOrdinal(all)} 次，直到找到大版本"
+                    RestoreFlow.needsPreviousChoice(all, current.historyMode, RestoreRuntime.state.value.previousOtaChoice) ->
+                        "请确认是否有倒数第二次保锁 OTA 备份"
+                    else -> "请按当前步骤继续"
+                })
+            } catch (error: Throwable) {
+                RestoreRuntime.state.value = RestoreRuntime.state.value.copy(error = error.message ?: error.javaClass.simpleName)
+            } finally {
+                RestoreRuntime.state.value = RestoreRuntime.state.value.copy(busy = false)
+            }
+        }
+    }
+
     private fun removeMessage(backup: BackupSet): String {
         val state = RestoreRuntime.state.value
         val ota = state.backups.filterIsInstance<OtaBackup>()
         val latest = backup is OtaBackup && backup.timestamp == ota.maxOfOrNull { it.timestamp }
         return if (latest && state.historyMode == OtaHistoryMode.MULTIPLE && ota.size > 1) {
-            "这是最后一次 OTA 的导入副本。移除它会同时移除倒数第二次副本，之后需要按顺序重新导入两次 OTA 备份。"
+            "这是最后一次 OTA 的导入副本。移除它会同时移除已导入的 OTA 历史，之后需要按顺序重新导入。"
         } else {
-            "确认移除 ${backup.displayName} 的 App 内导入副本？"
+            "确认移除 ${backup.displayName} 的 App 内导入副本？如需更改更新类型，可移除后重新导入。"
         }
     }
 
@@ -257,6 +296,7 @@ class MainActivity : ComponentActivity() {
                     (if (removeLatestChain) ota else listOf(backup)).forEach(imports::remove)
                     RestoreRuntime.setBackups(imports.loadAll())
                 }
+                pendingOtaType = null
                 RestoreRuntime.state.value = RestoreRuntime.state.value.copy(stage = "导入副本已移除，请按当前步骤继续")
             } catch (error: Throwable) {
                 RestoreRuntime.state.value = RestoreRuntime.state.value.copy(error = error.message ?: error.javaClass.simpleName)

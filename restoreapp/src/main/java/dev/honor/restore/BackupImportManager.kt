@@ -87,6 +87,18 @@ class BackupImportManager(private val context: Context) {
             .sortedBy { it.timestamp }
     }
 
+    fun setOtaType(backup: OtaBackup, type: dev.honor.restore.core.OtaPackageType): OtaBackup {
+        require(type != dev.honor.restore.core.OtaPackageType.UNSET)
+        val directory = backup.directory.canonicalFile
+        require(directory.parentFile == root.canonicalFile && Regex("[a-f0-9-]{36}").matches(directory.name)) { "导入目录身份无效" }
+        val temporary = File(directory, ".ota-type.tmp")
+        temporary.writeText(if (type == dev.honor.restore.core.OtaPackageType.MAJOR) "major" else "patch")
+        val marker = File(directory, ".ota-type")
+        temporary.copyTo(marker, overwrite = true)
+        check(temporary.delete()) { "OTA 类型临时文件清理失败" }
+        return BackupVerifier.verify(directory) as OtaBackup
+    }
+
     fun remove(backup: BackupSet) {
         val directory = backup.directory.canonicalFile
         require(directory.parentFile == root.canonicalFile && Regex("[a-f0-9-]{36}").matches(directory.name)) { "导入目录身份无效" }

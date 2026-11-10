@@ -1,6 +1,7 @@
 package dev.honor.restore
 
 import android.content.Context
+import dev.honor.restore.core.BootImageVerifier
 import dev.honor.restore.core.DevicePartition
 import dev.honor.restore.core.DeviceSnapshot
 import dev.honor.restore.core.GptSnapshot
@@ -22,9 +23,11 @@ class DeviceScanner(private val context: Context, private val shell: SuShell, pr
     fun scan(extraTargets: Set<String>): ScannedDevice {
         check(directory.isDirectory || directory.mkdirs()) { "设备扫描目录创建失败" }
         stage()
-        val names = linkedSetOf("abl_a", "abl_b", "init_boot_a", "init_boot_b", "efisp", "userdata")
+        val names = linkedSetOf("abl_a", "abl_b", "init_boot_a", "init_boot_b", "vbmeta_a", "vbmeta_b", "efisp", "userdata")
         names += extraTargets.filter { it != "efisp" && !it.startsWith("abl_") && !it.startsWith("init_boot_") }
         val identities = names.mapNotNull { name -> identity(name, required = name != "efisp") }.associateBy { it.substringBefore('|') }
+        val majorMinors = identities.values.map { it.split('|')[3] }
+        require(majorMinors.distinct().size == majorMinors.size) { "多个分区名指向同一块设备，已停止扫描" }
         val properties = properties()
         val images = mutableMapOf<String, File>()
         val partitions = mutableMapOf<String, DevicePartition>()
@@ -41,8 +44,13 @@ class DeviceScanner(private val context: Context, private val shell: SuShell, pr
             val prefixHashes = if (name.startsWith("abl_") && bytes > 642136L) {
                 mapOf(642136L to Hashes.sha256Prefix(file, 642136L))
             } else emptyMap()
-            partitions[name] = DevicePartition(name, identity, bytes, Hashes.sha256(file), prefixHashes)
+            val stockSha1 = if (name.startsWith("init_boot_")) BootImageVerifier.inspectBoot(file).stockImageSha1 else null
+            partitions[name] = DevicePartition(name, identity, bytes, Hashes.sha256(file), prefixHashes, stockSha1)
         }
+        val initBootChainKeys = listOf("a", "b").mapNotNull { slot ->
+            BootImageVerifier.chainKeys(images.getValue("vbmeta_$slot"))["init_boot"]?.let { slot to it }
+        }.toMap()
+        check(initBootChainKeys.size == 2) { "双槽 vbmeta 的 init_boot 链式公钥读取或验签失败" }
         val userdata = identities.getValue("userdata").split('|')
         val disk = diskFor(userdata[2])
         identities["efisp"]?.let { require(diskFor(it.split('|')[2]) == disk) { "userdata 与 efisp 不在同一物理磁盘" } }
@@ -65,7 +73,7 @@ class DeviceScanner(private val context: Context, private val shell: SuShell, pr
         val otaDirectories = otaDirectories()
         val snapshot = DeviceSnapshot(properties.getValue("SLOT"), properties.getValue("DISPLAY"), properties.getValue("FINGERPRINT"),
             partitions, disk, gpt, values.getValue("FS_BYTES").toLong(), properties["OTA_MARKER"].orEmpty(),
-            otaDirectories.first, otaDirectories.second, RestoreTransaction.isIncomplete(shell))
+            otaDirectories.first, otaDirectories.second, RestoreTransaction.isIncomplete(shell), initBootChainKeys)
         return ScannedDevice(snapshot, images, gptFile, directory)
     }
 

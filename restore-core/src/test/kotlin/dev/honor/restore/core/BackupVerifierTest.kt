@@ -133,6 +133,39 @@ class BackupVerifierTest {
         expectReject(directory)
     }
 
+    @Test
+    fun rejectsOutOfScopeWritesAndManifestEvidenceMismatch() = fixture { directory ->
+        writeOta(directory) { manifest ->
+            manifest.getJSONArray("writes").getJSONObject(0).put("target", "userdata")
+        }
+        expectReject(directory)
+        deleteContents(directory)
+        writeOta(directory, preparedMutator = { it.put("writes", JSONArray()) })
+        expectReject(directory)
+        deleteContents(directory)
+        writeOta(directory) { it.put("snapshots", JSONArray()) }
+        expectReject(directory)
+        assertTrue(OtaWritePolicy.isPreAblTarget("xbl_a"))
+        assertTrue(!OtaWritePolicy.isPreAblTarget("userdata"))
+        assertTrue(!OtaWritePolicy.isPreAblTarget("init_boot_a"))
+        assertTrue(OtaWritePolicy.isRestoreImageTarget("init_boot_a"))
+        assertTrue(!OtaWritePolicy.isRestoreImageTarget("userdata"))
+    }
+
+    @Test
+    fun rejectsWrongPatchModeAndSlotMarker() = fixture { directory ->
+        writeOta(directory) { it.put("request", "v2:EXPERIMENTAL:BUILTIN:OTHER_SLOT_ABL:FREEDOM") }
+        expectReject(directory)
+        deleteContents(directory)
+        writeOta(directory)
+        File(directory, "slot_active_a").writeText("b")
+        expectReject(directory)
+        deleteContents(directory)
+        writeOta(directory)
+        File(directory, "slot_active_a").delete()
+        expectReject(directory)
+    }
+
     private fun writeNormal(directory: File, mutate: (JSONObject) -> Unit = {}) {
         directory.mkdirs()
         val payload = byteArrayOf(1, 2, 3)
@@ -162,23 +195,35 @@ class BackupVerifierTest {
         directory.mkdirs()
         File(directory, "abl_a.img").writeBytes(byteArrayOf(1, 1, 1))
         File(directory, "abl_b.img").writeBytes(byteArrayOf(2, 2, 2))
+        File(directory, "init_boot_a.img").writeBytes(byteArrayOf(3, 3, 3))
+        File(directory, "init_boot_b.img").writeBytes(byteArrayOf(4, 4, 4))
+        File(directory, "slot_active_a").writeText("a")
+        val write = JSONObject().put("target", "abl_b").put("source", "abl_b.img")
+            .put("bytes", 3L).put("sha256", "f".repeat(64))
+        val writes = JSONArray().put(write)
         val prepared = JSONObject()
             .put("status", "backups_complete").put("lastPhase", "backups_complete")
-            .put("clickedAtEpochMillis", 1L).put("currentSlot", "a").put("request", "request")
+            .put("clickedAtEpochMillis", 1L).put("currentSlot", "a").put("request", "v2:EXPERIMENTAL:BUILTIN:OTHER_SLOT_ABL:FAKE_LOCK")
+            .put("writes", writes)
         preparedMutator(prepared)
         File(directory, "ota-backup.json").writeText(prepared.toString())
         val records = JSONArray()
-        listOf("abl_a.img", "abl_b.img", "ota-backup.json").forEach { name ->
+        val snapshots = JSONArray()
+        listOf("abl_a.img", "abl_b.img", "init_boot_a.img", "init_boot_b.img", "slot_active_a", "ota-backup.json").forEach { name ->
             val file = File(directory, name)
-            records.put(record(name, file.length(), Hashes.sha256(file)))
+            val hash = Hashes.sha256(file)
+            records.put(record(name, file.length(), hash))
+            if (name.endsWith("_a.img") || name.endsWith("_b.img")) {
+                val partition = name.removeSuffix(".img")
+                snapshots.put(JSONObject().put("identity", "$partition|/dev/block/by-name/$partition|/dev/block/test|1:1|${file.length()}|0|512")
+                    .put("sha256", hash))
+            }
         }
-        val write = JSONObject().put("target", "abl_b").put("source", "abl_b.img")
-            .put("bytes", 3L).put("sha256", "f".repeat(64))
         val complete = JSONObject()
             .put("format", "hnubl-ota-v1").put("status", "complete").put("lastPhase", "complete")
             .put("operation", "FULL").put("ramSourcesFrozen", true).put("currentSlot", "a")
-            .put("clickedAtEpochMillis", 1L).put("request", "request").put("backups", records)
-            .put("writes", JSONArray().put(write)).put("snapshots", JSONArray())
+            .put("clickedAtEpochMillis", 1L).put("request", "v2:EXPERIMENTAL:BUILTIN:OTHER_SLOT_ABL:FAKE_LOCK").put("backups", records)
+            .put("writes", writes).put("snapshots", snapshots)
         mutate(complete)
         File(directory, "ota-complete.json").writeText(complete.toString())
         File(directory, "ota-write-journal.log").writeText(journal)

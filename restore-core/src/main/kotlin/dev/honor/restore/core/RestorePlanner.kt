@@ -1,5 +1,8 @@
 package dev.honor.restore.core
 
+import java.io.File
+import java.security.MessageDigest
+
 object RestorePlanner {
     private val bases = listOf("abl", "init_boot")
     private val slots = listOf("a", "b")
@@ -12,11 +15,12 @@ object RestorePlanner {
         if (backups.isEmpty()) blockers += "尚未导入备份"
         backups.groupBy { it.id }.values.forEach { group -> if (group.size > 1) blockers += "备份标识重复：${group.first().displayName}" }
         val normal = backups.filterIsInstance<NormalBackup>().sortedBy { it.timestamp }
-        val allOta = backups.filterIsInstance<OtaBackup>().sortedBy { it.timestamp }
-        val ota = allOta.takeLast(2)
-        if (allOta.size > ota.size) notes += "更早的 ${allOta.size - ota.size} 套 OTA 备份不参与恢复；双槽只使用最近两次备份"
+        val ota = backups.filterIsInstance<OtaBackup>().sortedBy { it.timestamp }
         if (ota.zipWithNext().any { (left, right) -> left.timestamp >= right.timestamp }) {
             blockers += "OTA 备份时间顺序不唯一，无法建立恢复链"
+        }
+        if (ota.zipWithNext().any { (left, right) -> left.targetSlot != right.currentSlot }) {
+            blockers += "OTA 备份的槽位顺序不连续，不能按大版本/小补丁历史建立恢复计划"
         }
         val cleanNormal = normal.filter { backup ->
             backup.records.keys.filter { it.startsWith("gpt_") && it.endsWith(".raw") }.any { name ->
@@ -24,57 +28,156 @@ object RestorePlanner {
                     ?.let { it.named("userdata").isNotEmpty() && it.named("efisp").isEmpty() } == true
             }
         }
+        val clean = cleanNormal.lastOrNull()
         val selected = linkedMapOf<String, SourceCandidate>()
-        val sourceGaps = mutableSetOf<String>()
-        if (ota.isEmpty()) {
-            cleanNormal.lastOrNull()?.let { source ->
-                for (base in bases) for (slot in slots) select(target = "${base}_$slot", backup = source,
-                    recordName = "${base}_$slot.img", reason = "无保锁 OTA 记录，使用 GPT 不含 efisp 的干净普通备份", selected = selected,
-                    blockers = blockers, optional = false)
+        val latest = ota.lastOrNull()
+        val currentSlot = device?.runningSlot ?: latest?.targetSlot
+        val otherSlot = if (currentSlot == "a") "b" else "a"
+        val currentSlotOnly = historyMode == OtaHistoryMode.MULTIPLE && ota.size == 1 &&
+            latest?.packageType == OtaPackageType.MAJOR
+        val targetSlots = if (currentSlotOnly && currentSlot != null) listOf(currentSlot) else slots
+
+        fun select(target: String, backup: BackupSet, sourceSlot: String, reason: String) {
+            val base = target.substringBeforeLast('_')
+            val record = backup.records["${base}_$sourceSlot.img"]
+            if (record == null) {
+                blockers += "${backup.displayName} 缺少 ${base}_$sourceSlot.img"
+                return
             }
-            if (cleanNormal.isEmpty() && backups.isNotEmpty()) blockers += "缺少 GPT 不含 efisp 的假回锁前普通备份"
+            val file = backup.file(record.name)
+            if (!file.isFile) {
+                blockers += "${backup.displayName} 的 ${record.name} 不存在"
+                return
+            }
+            if (base == "init_boot") {
+                val result = BootImageVerifier.inspectBoot(file)
+                if (!result.signatureValid || !result.contentValid) {
+                    blockers += "$target 的候选 init_boot 未通过 AVB 原始内容或签名验证：${result.detail}"
+                    return
+                }
+                if (device != null && device.initBootChainKeys.isNotEmpty() &&
+                    device.initBootChainKeys[target.substringAfterLast('_')] != result.publicKeySha256) {
+                    blockers += "$target 的 init_boot 内嵌公钥与设备 vbmeta 链式公钥不一致"
+                    return
+                }
+                if (backup is OtaBackup) {
+                    warnings += "$target 的 init_boot 已通过 AVB 原始内容和签名校验，但其版本与当前系统或目标槽的适用性仍需你确认"
+                }
+                if (sourceSlot != target.substringAfterLast('_')) {
+                    val stockSha1 = sha1(file)
+                    val evidence = device?.partitions?.get(target)?.sha256 == record.sha256 ||
+                        crossSlotStockEvidence(backups, source = backup, target = target, stockSha1 = stockSha1, stockSha256 = record.sha256) ||
+                        device?.partitions?.get(target)?.stockImageSha1 == stockSha1
+                    if (!evidence) {
+                        blockers += "$target 没有证据证明该槽修补前的官方 init_boot 与来源槽镜像相同，禁止跨槽复用"
+                        return
+                    }
+                    notes += "$target 跨槽复用依据：原版 stock_image.sha1、当前镜像或后续备份证明其与所选干净镜像相同"
+                }
+            } else {
+                val knownPatched = record.sha256 == BUILTIN_ABL_SHA256 ||
+                    (file.length() > 642136L && Hashes.sha256Prefix(file, 642136L) == BUILTIN_ABL_SHA256)
+                if (knownPatched) {
+                    blockers += "$target 的候选 ABL 是已识别的 hnubl 内置修补版，禁止作为干净镜像"
+                    return
+                }
+                val structure = AblRollbackInspector.inspect(file)
+                if (structure is AblRollbackInspector.Result.Invalid) {
+                    blockers += "$target 的候选 ABL 结构无效：${structure.reason}"
+                    return
+                }
+                if (sourceSlot != target.substringAfterLast('_')) {
+                    warnings += "$target 跨槽复用同一 ABL：已排除已知内置修补版并检查结构，但未独立验证厂商签名信任链；版本兼容及小补丁未更新 ABL 由你确认并承担风险"
+                } else {
+                    warnings += "$target 的 ABL 已排除已知内置修补版并检查结构，但官方版本、签名信任链及与当前系统的兼容性仍需你确认并承担风险"
+                }
+            }
+            selected[target] = SourceCandidate(target, backup.id, record.name, record.sha256, record.bytes, reason)
+        }
+
+        fun selectFromNormal(target: String) {
+            val source = clean
+            if (source == null) {
+                blockers += "缺少 GPT 不含 efisp 的假回锁前普通备份"
+                return
+            }
+            select(target, source, target.substringAfterLast('_'), "假回锁前普通备份的对应槽镜像；文件、AVB/结构与版本适用性分别核对")
+        }
+
+        fun selectFromOta(target: String, source: OtaBackup, reason: String) =
+            select(target, source, source.targetSlot, reason)
+
+        if (historyMode == OtaHistoryMode.NONE) {
+            if (ota.isNotEmpty()) blockers += "你选择了假回锁后没有 OTA，但导入了 OTA 备份；请核对实际次数"
+            for (base in bases) for (slot in slots) selectFromNormal("${base}_$slot")
+            if (clean == null && backups.isNotEmpty()) blockers += "缺少 GPT 不含 efisp 的假回锁前普通备份"
+        } else if (latest == null) {
+            if (backups.isNotEmpty()) blockers += "尚未导入实际保锁 OTA 备份并选择其更新类型"
         } else {
-            selectOtaSources(cleanNormal, ota, selected, blockers, notes, sourceGaps, historyMode == OtaHistoryMode.ONE)
-        }
-        if (historyMode == OtaHistoryMode.NONE && ota.isNotEmpty()) {
-            blockers += "你选择了假回锁后没有 OTA，但导入了 OTA 备份；请核对实际次数"
-        }
-        if (historyMode == OtaHistoryMode.ONE && ota.size > 1) {
-            blockers += "你选择了仅一次 OTA，却导入了多套 OTA 备份；请只保留最近一次，或改选多次"
-        }
-        if (device != null && ota.isNotEmpty()) {
-            val latest = ota.last()
-            if (device.runningSlot != latest.targetSlot) {
+            if (ota.any { it.packageType == OtaPackageType.UNSET }) {
+                blockers += "每次导入 OTA 备份后，都必须确认它是大版本还是小补丁"
+            }
+            if (device != null && device.runningSlot != latest.targetSlot) {
                 blockers += "当前运行槽位为 ${device.runningSlot}，已导入中时间最晚的 OTA 备份目标槽为 ${latest.targetSlot}；可能缺少后续 OTA 备份或发生过槽位回退"
             }
+            if (historyMode == OtaHistoryMode.ONE && ota.size != 1) {
+                blockers += "你选择了仅一次 OTA，却导入了多套 OTA 备份；请重新按实际历史导入"
+            }
+            when (latest.packageType) {
+                OtaPackageType.UNSET -> Unit
+                OtaPackageType.MAJOR -> when (historyMode) {
+                    OtaHistoryMode.ONE -> {
+                        for (base in bases) {
+                            selectFromOta("${base}_${latest.targetSlot}", latest,
+                                "一次大版本 OTA 的目标槽镜像；另一槽使用假回锁前对应槽备份")
+                            selectFromNormal("${base}_${latest.currentSlot}")
+                        }
+                        warnings += "一次大版本：新目标槽采用该次镜像，另一槽采用假回锁前镜像；两份镜像的版本和适用性需你确认"
+                    }
+                    OtaHistoryMode.MULTIPLE -> {
+                        val previous = ota.dropLast(1).lastOrNull()
+                        for (base in bases) {
+                            selectFromOta("${base}_${latest.targetSlot}", latest,
+                                "最后一次大版本 OTA 的目标槽镜像")
+                            if (previous?.packageType == OtaPackageType.MAJOR) {
+                                selectFromOta("${base}_${previous.targetSlot}", previous,
+                                    "倒数第二次为大版本，使用其目标槽镜像恢复对应槽")
+                            } else if (!currentSlotOnly && currentSlot != null) {
+                                selectFromOta("${base}_$otherSlot", latest,
+                                    "小补丁在前、大版本在后；以最后一次大版本镜像为双槽候选")
+                            }
+                        }
+                        if (previous?.packageType == OtaPackageType.MAJOR) {
+                            notes += "两次都是大版本：分别采用两次备份中的目标槽镜像，未把整份备份一概视为干净"
+                        } else if (previous?.packageType == OtaPackageType.PATCH) {
+                            warnings += "小补丁在前、大版本在后：双槽均考虑最后一次大版本镜像；跨槽和版本适用性仍需逐项通过检查"
+                        }
+                    }
+                    else -> blockers += "请选择假回锁后的实际 OTA 次数"
+                }
+                OtaPackageType.PATCH -> when (historyMode) {
+                    OtaHistoryMode.ONE -> {
+                        for (base in bases) for (slot in slots) selectFromNormal("${base}_$slot")
+                        warnings += "仅一次小补丁：按你的确认，该补丁未更新 ABL/init_boot，双槽使用假回锁前镜像；App 无法独立核实补丁内容，错误判断可能导致无法启动"
+                    }
+                    OtaHistoryMode.MULTIPLE -> {
+                        val major = ota.lastOrNull { it.packageType == OtaPackageType.MAJOR }
+                        if (major == null) {
+                            blockers += "最近连续多次都是小补丁，尚未导入此前的大版本备份；请继续按倒数顺序导入，直到找到大版本"
+                        } else {
+                            for (base in bases) for (slot in targetSlots) selectFromOta("${base}_$slot", major,
+                                "最近为小补丁，采用此前大版本目标槽镜像作为双槽候选")
+                            warnings += "最近为小补丁：你确认从 ${major.displayName} 对应的大版本之后，所有小补丁均未更新 ABL/init_boot。App 无法独立核实，版本判断错误可能导致当前槽或另一槽无法启动"
+                        }
+                    }
+                    else -> blockers += "请选择假回锁后的实际 OTA 次数"
+                }
+            }
         }
-        val currentSlot = device?.runningSlot ?: ota.lastOrNull()?.targetSlot
-        val otherSlot = when (currentSlot) {
-            "a" -> "b"
-            "b" -> "a"
-            else -> null
-        }
-        val currentSlotOnly = currentSlot != null && otherSlot != null && ota.isNotEmpty() && historyMode != OtaHistoryMode.ONE &&
-            (historyMode != OtaHistoryMode.MULTIPLE || ota.size < 2) && bases.all { base -> selected.containsKey("${base}_$currentSlot") }
         if (currentSlotOnly) {
-            blockers.removeAll { message -> sourceGaps.any { target -> message.startsWith("$target ") || message.contains("$target ") } }
-            if (historyMode == OtaHistoryMode.MULTIPLE) {
-                warnings += "假回锁后执行过多次 OTA，但缺少倒数第二次备份：只能恢复当前 $currentSlot 槽，另一 $otherSlot 槽留待后续官方 OTA 修复"
-            } else {
-                warnings += "尚未确认假回锁后的 OTA 次数：当前先按仅恢复 $currentSlot 槽处理；如果实际只有一次 OTA，请选择“1 次”以使用干净备份恢复另一槽"
-            }
-            warnings += "仅恢复当前 $currentSlot 槽：另一 $otherSlot 槽不处理。删除共享 efisp 后，另一槽可能无法启动，不能再作为可靠回退槽。"
-            warnings += "下一次系统更新不能直接使用不含 ABL/init_boot 的小增量包；必须使用包含它们的官方全量包，或先修复另一槽。只有官方 OTA 写入、切槽和重启全部成功，另一槽才算修复。"
-            warnings += "如果当前槽第一次启动失败，可能无法依靠另一槽自救。请先导出个人数据和恢复前备份，接受这个风险后再继续。"
-            notes += "普通恢复模式仅处理当前槽；未验证所传 OTA 是否为实际最近一次，由用户确认"
-        }
-        if (ota.isNotEmpty()) {
-            when (historyMode) {
-                OtaHistoryMode.ONE -> notes += "仅一次 OTA：目标槽使用最近备份，另一槽使用假回锁前的干净备份，可进行双槽恢复"
-                OtaHistoryMode.MULTIPLE -> if (ota.size >= 2) notes += "多次 OTA：使用最近两次备份分别恢复双槽，更早备份不参与"
-                OtaHistoryMode.UNKNOWN -> warnings += "请选择假回锁后的实际 OTA 次数；App 不会根据 A/B 交替猜测总次数"
-                OtaHistoryMode.NONE -> Unit
-            }
+            warnings += "只有最近一次大版本备份：仅恢复当前 $currentSlot 槽，另一 $otherSlot 槽不处理。删除共享 efisp 后，另一槽可能无法启动，不能再作为可靠回退槽"
+            warnings += "下一次系统更新不能直接使用不含 ABL/init_boot 的小增量包；必须使用包含它们的官方全量包，或先修复另一槽"
+            notes += "仅当前槽属于风险承担方案；未验证所传 OTA 是否为实际最近一次，由用户确认"
         }
         val historyMismatch = when {
             device?.otaDirectoryCount == null -> null
@@ -88,8 +191,7 @@ object RestorePlanner {
         }
         if (historyMismatch != null) warnings += historyMismatch
         val strategy = if (currentSlotOnly) RestoreStrategy.CURRENT_SLOT_ONLY else RestoreStrategy.FULL
-        val imageSlots = if (currentSlotOnly) listOf(currentSlot) else slots
-        for (base in bases) for (slot in imageSlots) {
+        for (base in bases) for (slot in targetSlots) {
             val target = "${base}_$slot"
             val candidate = selected[target] ?: continue
             val sourceBackup = backups.singleOrNull { it.id == candidate.backupId }
@@ -107,18 +209,19 @@ object RestorePlanner {
                 continue
             }
             if (partition?.sha256 == candidate.sha256) {
-                notes += "$target 已经与候选原厂镜像一致，无需重复写入"
+                notes += "$target 已经与所选且通过当前检查的恢复镜像一致，无需重复写入"
                 continue
             }
             if (base == "abl" && partition != null) {
-                val knownModified = partition.prefixHashes[642136L] == BUILTIN_ABL_SHA256 || ota.any { source ->
-                    val write = source.write(target)
-                    write != null && (partition.sha256 == write.sha256 || partition.prefixHashes[write.bytes] == write.sha256)
-                }
-                if (!knownModified) blockers += "$target 当前内容不属于已识别的 hnubl 修改或候选原厂镜像，已停止自动恢复"
+                val knownCurrent = partition.prefixHashes[642136L] == BUILTIN_ABL_SHA256 ||
+                    ota.any { source ->
+                        val write = source.write(target)
+                        write != null && (partition.sha256 == write.sha256 || partition.prefixHashes[write.bytes] == write.sha256)
+                    } || backups.any { it.records["$target.img"]?.sha256 == partition.sha256 }
+                if (!knownCurrent) blockers += "$target 当前内容不属于已识别的 hnubl 修改、候选镜像或已导入备份，已停止自动恢复"
             } else if (partition != null) {
-                val known = backups.any { it.records[target]?.sha256 == partition.sha256 }
-                if (!known) warnings += "$target 当前哈希不在备份中；若是 OTA 后重新修补的 KernelSU/SukiSU 镜像，这是预期情况，请人工核对"
+                val known = backups.any { it.records["$target.img"]?.sha256 == partition.sha256 }
+                if (!known) warnings += "$target 当前哈希不在备份中；执行前会重新读取并核对，不会把当前镜像当作恢复来源"
             }
             operations += ImageRestoreOperation(target, candidate.backupId, candidate.sourceName, candidate.sha256,
                 candidate.bytes, partition?.sha256.orEmpty(), partition?.identity.orEmpty(), partition?.bytes ?: candidate.bytes, candidate.reason)
@@ -127,13 +230,13 @@ object RestorePlanner {
         var gptOperation: GptRestoreOperation? = null
         if (device == null) {
             blockers += "尚未读取真实设备状态；当前结果只能用于离线审查"
+            notes += "设备扫描后将用真实 vbmeta 链式公钥复核 init_boot；离线通过不等于已允许写入"
         } else {
-            if (device.incompleteRestore) {
-                blockers += "上次恢复中断或结果未复核，必须先完成人工核验并清除中断标记"
-            }
+            if (device.incompleteRestore) blockers += "上次恢复中断或结果未复核，必须先完成人工核验并清除中断标记"
             if (device.otaMarker == "1") {
                 warnings += "检测到历史 freeotaok=1 标记。它只表示上次保锁 OTA 已完成，不能证明当前仍在等待重启；若系统已正常使用，可继续，执行前请确认没有待重启更新"
             }
+            if (device.initBootChainKeys.isEmpty()) blockers += "没有取得设备 vbmeta 的 init_boot 链式公钥，不能完成镜像校验"
             if (device.f2fsBytes <= 0) blockers += "F2FS 容量检查未通过"
             val currentGpt = device.gpt
             if (currentGpt == null) {
@@ -141,9 +244,9 @@ object RestorePlanner {
             } else if (currentGpt.named("efisp").isNotEmpty()) {
                 val currentUserdataBytes = currentGpt.named("userdata").singleOrNull()?.let { (it.endLba - it.startLba + 1) * currentGpt.logicalSectorBytes }
                 if (currentUserdataBytes == null || device.f2fsBytes > currentUserdataBytes) blockers += "F2FS 超出当前 userdata 分区边界"
-                val clean = findCleanGpt(normal, currentGpt, blockers)
-                if (clean != null) {
-                    val (backup, name, snapshot) = clean
+                val cleanGpt = findCleanGpt(normal, currentGpt, blockers)
+                if (cleanGpt != null) {
+                    val (backup, name, snapshot) = cleanGpt
                     val restoredBytes = snapshot.named("userdata").single().let { (it.endLba - it.startLba + 1) * snapshot.logicalSectorBytes }
                     if (device.f2fsBytes > restoredBytes) blockers += "F2FS 无法容纳于恢复后的 userdata"
                     gptOperation = GptRestoreOperation(device.gptDisk, backup.id, name, currentGpt.sha256, snapshot.sha256,
@@ -154,7 +257,7 @@ object RestorePlanner {
             }
         }
         notes += "恢复过程不格式化 userdata、不主动扩大 F2FS、不切换槽位、不自动重启"
-        notes += "执行前暂停系统更新和其他分区工具；旧备份没有完整版本指纹，需人工核对当前系统镜像"
+        notes += "大版本/小补丁由用户声明；App 无法仅凭 hnubl 备份独立核实官方补丁清单，相关版本假设属于风险承担范围"
         notes += "不执行官方回锁，不修改 OEMINFO/DeviceInfo；Fastboot 的 PHONE Unlocked 需要单独核验"
         return RestorePlan(
             status = if (blockers.isEmpty()) RestorePlanStatus.READY else RestorePlanStatus.BLOCKED,
@@ -168,74 +271,26 @@ object RestorePlanner {
         )
     }
 
-    private fun selectOtaSources(
-        normal: List<NormalBackup>, ota: List<OtaBackup>, selected: MutableMap<String, SourceCandidate>,
-        blockers: MutableList<String>, notes: MutableList<String>, sourceGaps: MutableSet<String>, allowOriginalWithoutOta: Boolean,
-    ) {
-        val latest = ota.last()
-        for (base in bases) {
-            val targetName = "${base}_${latest.targetSlot}.img"
-            val targetRecord = latest.records[targetName]
-            if (targetRecord == null) {
-                blockers += "最近 OTA 备份缺少目标槽镜像 $targetName"
-                continue
-            }
-            notes += "${latest.displayName}：运行时槽位 ${latest.currentSlot}，保锁写入目标 ${latest.targetSlot}，目标槽镜像用于恢复候选"
-            for (slot in slots) {
-                val target = "${base}_$slot"
-                val recordName = "$target.img"
-                val currentRecord = latest.records[recordName]
-                when {
-                    currentRecord?.sha256 == targetRecord.sha256 -> select(target, latest, targetRecord.name,
-                        "与最近 OTA 目标槽的原厂候选哈希一致，可复用同一镜像", selected, blockers, false)
-                    slot == latest.targetSlot -> select(target, latest, targetRecord.name,
-                        "最近 OTA 目标槽在保锁 ABL 覆盖前的备份", selected, blockers, false)
-                    else -> selectOlderSlotSource(normal, ota.dropLast(1), latest, base, slot, selected, blockers, sourceGaps, allowOriginalWithoutOta)
-                }
-            }
+    private fun crossSlotStockEvidence(backups: List<BackupSet>, source: BackupSet, target: String, stockSha1: String, stockSha256: String): Boolean =
+        backups.filterIsInstance<OtaBackup>().filter { it.timestamp >= source.timestamp }.any { backup ->
+            val record = backup.records["$target.img"] ?: return@any false
+            runCatching {
+                val result = BootImageVerifier.inspectBoot(backup.file(record.name))
+                result.stockImageSha1 == stockSha1 || (record.sha256 == stockSha256 && result.signatureValid && result.contentValid)
+            }.getOrDefault(false)
         }
-    }
 
-    private fun selectOlderSlotSource(
-        normal: List<NormalBackup>, previousOta: List<OtaBackup>, latest: OtaBackup, base: String, slot: String,
-        selected: MutableMap<String, SourceCandidate>, blockers: MutableList<String>, sourceGaps: MutableSet<String>,
-        allowOriginalWithoutOta: Boolean,
-    ) {
-        val target = "${base}_$slot"
-        val recordName = "$target.img"
-        val currentRecord = latest.records[recordName]
-        fun gap(message: String) {
-            blockers += message
-            sourceGaps += target
-        }
-        val previous = previousOta.lastOrNull { it.targetSlot == slot }
-        if (previous != null) {
-            val previousRecord = previous.records[recordName]
-            val previousWrite = previous.write(target)
-            when {
-                previousRecord == null -> gap("$target 缺少前一次 OTA 的原厂候选")
-                base == "init_boot" -> select(target, previous, previousRecord.name,
-                    "该槽前一次作为 OTA 目标时的 init_boot 备份；当前槽镜像可能随后被 Root 修补", selected, blockers, false)
-                currentRecord?.sha256 == previousWrite?.sha256 -> select(target, previous, previousRecord.name,
-                    "当前槽仍是前一次保锁写入内容，恢复该次 OTA 覆盖前镜像", selected, blockers, false)
-                currentRecord?.sha256 == previousRecord.sha256 -> select(target, previous, previousRecord.name,
-                    "当前槽与前一次 OTA 覆盖前镜像一致", selected, blockers, false)
-                else -> gap("$target 在两次 OTA 之间发生了未被记录解释的 ABL 变化；请提供当前版本官方镜像")
-            }
-            return
-        }
-        if (allowOriginalWithoutOta) {
-            normal.lastOrNull()?.let { original ->
-                select(target, original, recordName, "该槽未经历此次 OTA，使用假回锁前的干净备份", selected, blockers, false)
-                return
+    private fun sha1(file: File): String {
+        val digest = MessageDigest.getInstance("SHA-1")
+        file.inputStream().use { input ->
+            val buffer = ByteArray(64 * 1024)
+            while (true) {
+                val count = input.read(buffer)
+                if (count < 0) break
+                if (count > 0) digest.update(buffer, 0, count)
             }
         }
-        val original = normal.lastOrNull { it.records[recordName]?.sha256 == currentRecord?.sha256 }
-        if (original != null) {
-            select(target, original, recordName, "当前槽镜像与已校验的普通备份一致，且没有更早 OTA 覆盖记录", selected, blockers, false)
-        } else {
-            gap("$target 不能仅由最近 OTA 的当前槽备份证明为原厂镜像（${latest.displayName}）；请补充早期 OTA 或当前版本官方镜像")
-        }
+        return digest.digest().joinToString("") { "%02x".format(it.toInt() and 255) }
     }
 
     private fun restorePreAbl(
@@ -244,7 +299,7 @@ object RestorePlanner {
         excludedSlot: String?,
     ) {
         val targets = ota.flatMap { source -> source.writes.map { it.target } }
-            .filter { it != "efisp" && !it.startsWith("abl_") && !it.startsWith("init_boot_") }.distinct()
+            .filter(OtaWritePolicy::isPreAblTarget).distinct()
         for (target in targets) {
             if (excludedSlot != null && target.endsWith("_$excludedSlot")) {
                 notes += "$target 位于不处理的另一槽，本次不写入"
@@ -296,17 +351,5 @@ object RestorePlanner {
         }
         blockers += lastError
         return null
-    }
-
-    private fun select(
-        target: String, backup: BackupSet, recordName: String, reason: String,
-        selected: MutableMap<String, SourceCandidate>, blockers: MutableList<String>, optional: Boolean,
-    ) {
-        val record = backup.records[recordName]
-        if (record == null) {
-            if (!optional) blockers += "${backup.displayName} 缺少 $recordName"
-            return
-        }
-        selected[target] = SourceCandidate(target, backup.id, recordName, record.sha256, record.bytes, reason)
     }
 }

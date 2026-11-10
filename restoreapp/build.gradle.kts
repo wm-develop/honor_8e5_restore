@@ -9,13 +9,14 @@ android {
     namespace = "dev.honor.restore"
     compileSdk = 37
     buildToolsVersion = "37.0.0"
+    testBuildType = providers.gradleProperty("RESTORE_TEST_BUILD_TYPE").orElse("debug").get()
 
     defaultConfig {
         applicationId = "wm.honor8e5restore"
         minSdk = 28
         targetSdk = 37
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 3
+        versionName = "0.2.1"
         manifestPlaceholders["appLabel"] = "hnubl恢复助手"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk { abiFilters += "arm64-v8a" }

@@ -22,7 +22,7 @@ class RestoreRuntimeTest {
         val directory = File("../ublbackup_20261029_233101").canonicalFile
         assumeTrue(directory.isDirectory)
         val clean = BackupVerifier.verify(directory)
-        ota = OtaBackup("latest", File("latest"), "latest", 1, emptyMap(), "a", emptyList(), emptyMap())
+        ota = OtaBackup("latest", File("latest"), "latest", 1, emptyMap(), "a", emptyList(), emptyMap(), dev.honor.restore.core.OtaPackageType.MAJOR)
         backups = listOf(clean, ota)
         RestoreRuntime.state.value = RestoreUiState()
     }
@@ -32,7 +32,7 @@ class RestoreRuntimeTest {
         RestoreRuntime.state.value = RestoreUiState(backups = backups, historyMode = OtaHistoryMode.MULTIPLE,
             previousOtaChoice = PreviousOtaChoice.UNASKED, plan = readyPlan())
         val error = runCatching { RestoreRuntime.requireReadyPlan() }.exceptionOrNull()
-        assertTrue(error is IllegalStateException && error.message?.contains("倒数第二次") == true)
+        assertTrue(error is IllegalStateException && error.message?.contains("更新类型") == true)
         assertFalse(RestoreRuntime.canReview())
     }
 

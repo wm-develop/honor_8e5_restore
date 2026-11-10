@@ -26,6 +26,8 @@ data class NormalBackup(
 
 data class OtaWrite(val target: String, val source: String, val bytes: Long, val sha256: String)
 
+enum class OtaPackageType { UNSET, MAJOR, PATCH }
+
 data class OtaBackup(
     override val id: String,
     override val directory: File,
@@ -35,6 +37,7 @@ data class OtaBackup(
     val currentSlot: String,
     val writes: List<OtaWrite>,
     val snapshots: Map<String, String>,
+    val packageType: OtaPackageType = OtaPackageType.UNSET,
 ) : BackupSet {
     val targetSlot: String get() = if (currentSlot == "a") "b" else "a"
     fun write(target: String): OtaWrite? = writes.singleOrNull { it.target == target }
@@ -46,6 +49,7 @@ data class DevicePartition(
     val bytes: Long,
     val sha256: String,
     val prefixHashes: Map<Long, String> = emptyMap(),
+    val stockImageSha1: String? = null,
 )
 
 data class DeviceSnapshot(
@@ -60,6 +64,7 @@ data class DeviceSnapshot(
     val otaDirectoryCount: Int? = null,
     val otaDirectoryNames: List<String> = emptyList(),
     val incompleteRestore: Boolean = false,
+    val initBootChainKeys: Map<String, String> = emptyMap(),
 )
 
 data class ImageRestoreOperation(
