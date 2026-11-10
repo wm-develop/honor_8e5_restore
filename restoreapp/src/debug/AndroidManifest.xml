@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <provider
+            android:name="dev.honor.restore.AuditProvider"
+            android:authorities="dev.honor.restore.audit"
+            android:exported="false" />
+        <provider
+            android:name="dev.honor.restore.AuditDocumentProvider"
+            android:authorities="dev.honor.restore.audit.documents"
+            android:exported="false" />
+    </application>
+</manifest>
